@@ -423,23 +423,48 @@ skip_io:
 	goto repeat_eom_scan;
 }
 
-static int generate_eom_report(char *eom_file, struct EOMData *data)
+static void json_write_string(FILE *file, const char *str)
 {
-	char mname[MANUFACTURER_NAME_STRING_DESC_SIZE];
-	char pname[PRODUCT_NAME_STRING_DESC_SIZE];
-	char pver[PRODUCT_REVISION_LEVEL_STRING_DESC_SIZE];
-	int i, ret;
-	FILE *file;
+	const unsigned char *p = (const unsigned char *)str;
 
-	ret = get_device_info(mname, pname, pver);
-	if (ret)
-		return ret;
-
-	file = fopen(eom_file, "w");
-	if (!file) {
-		pr_err("Failed to create EOM result file %s\n", eom_file);
-		return ERROR;
+	fputc('"', file);
+	for (; *p; p++) {
+		switch (*p) {
+		case '\"':
+			fputs("\\\"", file);
+			break;
+		case '\\':
+			fputs("\\\\", file);
+			break;
+		case '\b':
+			fputs("\\b", file);
+			break;
+		case '\f':
+			fputs("\\f", file);
+			break;
+		case '\n':
+			fputs("\\n", file);
+			break;
+		case '\r':
+			fputs("\\r", file);
+			break;
+		case '\t':
+			fputs("\\t", file);
+			break;
+		default:
+			if (*p < 0x20)
+				fprintf(file, "\\u%04x", *p);
+			else
+				fputc(*p, file);
+			break;
+		}
 	}
+	fputc('"', file);
+}
+
+static int generate_eom_report_text(FILE *file, struct EOMData *data, const char *mname, const char *pname, const char *pver)
+{
+	int i;
 
 	fprintf(file, "UFS %s Side Eye Monitor Start\n", data->local_peer ? "Device" : "Host");
 	fprintf(file, "- - - - UFS INQUIRY ID: %s %s %s\n", mname, pname, pver);
@@ -450,12 +475,121 @@ static int generate_eom_report(char *eom_file, struct EOMData *data)
 
 	for (i = 0; i < data->data_cnt; i++)
 		fprintf(file, "lane: %d timing: %d voltage: %d error count: %d\n", data->er[i].lane, data->er[i].timing,
-										   data->er[i].volt, data->er[i].error_cnt);
-
-	fclose(file);
-	printf("EOM results saved to %s\n", eom_file);
+											   data->er[i].volt, data->er[i].error_cnt);
 
 	return SUCCESS;
+}
+
+static int generate_eom_report_json(FILE *file, struct EOMData *data, const char *mname, const char *pname, const char *pver)
+{
+	char note[MANUFACTURER_NAME_STRING_DESC_SIZE + PRODUCT_NAME_STRING_DESC_SIZE +
+		  PRODUCT_REVISION_LEVEL_STRING_DESC_SIZE + 4];
+	double time_scale, voltage_scale;
+	int l, n, i;
+
+	if (snprintf(note, sizeof(note), "%s %s %s", mname, pname, pver) >= sizeof(note)) {
+		pr_err("Device note is too long\n");
+		return ERROR;
+	}
+
+	time_scale = (data->timing_max_offset * 0.01) / data->timing_max_steps;
+	voltage_scale = (data->voltage_max_offset * 10.0) / data->voltage_max_steps;
+	voltage_scale = ((int)(voltage_scale * 100)) / 100.0;
+
+	fprintf(file, "{\n");
+	fprintf(file, "  \"version\": \"1.0.0\",\n");
+	fprintf(file, "  \"results\": [\n");
+	fprintf(file, "    {\n");
+	fprintf(file, "      \"interface\": \"%s\",\n", data->local_peer ? "Device UFS" : "Host UFS");
+	fprintf(file, "      \"instance\": 0,\n");
+	fprintf(file, "      \"time_scale\": %.5f,\n", time_scale);
+	fprintf(file, "      \"time_units\": \"UI\",\n");
+	fprintf(file, "      \"voltage_scale\": %.2f,\n", voltage_scale);
+	fprintf(file, "      \"voltage_units\": \"mV\",\n");
+	fprintf(file, "      \"note\": ");
+	json_write_string(file, note);
+	fprintf(file, ",\n");
+	fprintf(file, "      \"lanes\": [\n");
+
+	for (l = lane, n = data->num_lanes; n > 0; n--, l++) {
+		fprintf(file, "        {\n");
+		fprintf(file, "          \"lane_number\": %d,\n", l);
+		fprintf(file, "          \"note\": \"\",\n");
+		fprintf(file, "          \"eye\": [\n");
+
+		for (i = 0; i < data->data_cnt; i++) {
+			if (data->er[i].lane != l)
+				continue;
+
+			fprintf(file, "            [%d, %d, %d]", data->er[i].timing, data->er[i].volt, data->er[i].error_cnt);
+
+			if (i < data->data_cnt - 1) {
+				int j;
+				bool has_more_for_lane = false;
+
+				for (j = i + 1; j < data->data_cnt; j++) {
+					if (data->er[j].lane == l) {
+						has_more_for_lane = true;
+						break;
+					}
+				}
+
+				if (has_more_for_lane)
+					fprintf(file, ",");
+			}
+			fprintf(file, "\n");
+		}
+
+		fprintf(file, "          ]\n");
+		fprintf(file, "        }");
+		if (n > 1)
+			fprintf(file, ",");
+		fprintf(file, "\n");
+	}
+
+	fprintf(file, "      ]\n");
+	fprintf(file, "    }\n");
+	fprintf(file, "  ]\n");
+	fprintf(file, "}\n");
+
+	return SUCCESS;
+}
+
+static int generate_eom_report(char *eom_file, struct EOMData *data)
+{
+	char mname[MANUFACTURER_NAME_STRING_DESC_SIZE];
+	char pname[PRODUCT_NAME_STRING_DESC_SIZE];
+	char pver[PRODUCT_REVISION_LEVEL_STRING_DESC_SIZE];
+	int ret;
+	FILE *file;
+	bool is_stdout = output_target == EOM_OUTPUT_TARGET_STDOUT;
+
+	ret = get_device_info(mname, pname, pver);
+	if (ret)
+		return ret;
+
+	if (is_stdout) {
+		file = stdout;
+	} else {
+		file = fopen(eom_file, "w");
+		if (!file) {
+			pr_err("Failed to create EOM result file %s\n", eom_file);
+			return ERROR;
+		}
+	}
+
+	if (output_format == EOM_OUTPUT_FORMAT_JSON)
+		ret = generate_eom_report_json(file, data, mname, pname, pver);
+	else
+		ret = generate_eom_report_text(file, data, mname, pname, pver);
+
+	if (!is_stdout)
+		fclose(file);
+
+	if (!ret && !is_stdout)
+		printf("EOM results saved to %s\n", eom_file);
+
+	return ret;
 }
 
 static int init_output_target(void)
