@@ -59,6 +59,18 @@ struct EOMData {
 	struct eom_result *er;
 } eom_data;
 
+enum eom_output_target {
+	EOM_OUTPUT_TARGET_UNSET = 0,
+	EOM_OUTPUT_TARGET_DIR,
+	EOM_OUTPUT_TARGET_FILE,
+	EOM_OUTPUT_TARGET_STDOUT,
+};
+
+enum eom_output_format {
+	EOM_OUTPUT_FORMAT_TEXT = 0,
+	EOM_OUTPUT_FORMAT_JSON,
+};
+
 static char output_path[DEVICE_PATH_NAME_SIZE_MAX];
 static char device_path[DEVICE_PATH_NAME_SIZE_MAX];
 const static char *ufseom_tmp_file = "ufseom_tmp_data";
@@ -75,10 +87,12 @@ static int eom_result_count;
 static int tmp_fd, bsg_fd;
 static bool do_io;
 static bool verbose;
+static int output_target;
+static int output_format;
 
 const char *ufseom_help =
 	"\nufseom cli :\n\n"
-	"ufseom [-p | --peer | -l | --local] [-D | --data] [-L | --lane <lane no.>] [--voltage-low <low voltage value>] [--voltage-high <high voltage value>] [--timing-left <left timing value>] [--timing-right <right timing value>] [-T | --target <target test count>] [-o | --output <output>] [-d | --device <device>]\n\n"
+	"ufseom [-p | --peer | -l | --local] [-D | --data] [-L | --lane <lane no.>] [--voltage-low <low voltage value>] [--voltage-high <high voltage value>] [--timing-left <left timing value>] [--timing-right <right timing value>] [-T | --target <target test count>] [-f | --format <text|json>] [-o | --output <output>] [-d | --device <device>]\n\n"
 	"-h : help\n"
 	"--version : UFS EOM version\n"
 	"-p | --peer : peer\n"
@@ -90,7 +104,8 @@ const char *ufseom_help =
 	"--timing-left : collect EOM data from left timing to right timing, if it is not given, it defaults to -timing_max_steps\n"
 	"--timing-right : collect EOM data from left timing to right timing, if it is not given, it defaults to timing_max_steps\n"
 	"-t | --target : target test count\n"
-	"-o | --output : path to the folder where the EOM report is saved\n"
+	"-f | --format : output format. supported values: text, json\n"
+	"-o | --output : report output destination. '-' for stdout, file path, or folder path ending with '/'\n"
 	"-V | --verbose : enable detailed EOM information and logs\n"
 	"-d | --device : path to ufs-bsg device\n\n"
 	"Example:\n"
@@ -103,7 +118,9 @@ const char *ufseom_help =
 	"  4. Collect EOM data for local Rx from voltage 0 to 8:\n"
 	"  ufseom -l -D --voltage-low 0 --voltage-high 8 -o /data/ -d /dev/ufs-bsg0\n"
 	"  5. Collect EOM data for local Rx for voltage from 0 to 8 and timing from -1 to 1:\n"
-	"  ufseom -l -D --voltage-low 0 --voltage-high 8 --timing-left -1 --timing-right 1 -o /data/ -d /dev/ufs-bsg0\n\n"
+	"  ufseom -l -D --voltage-low 0 --voltage-high 8 --timing-left -1 --timing-right 1 -o /data/ -d /dev/ufs-bsg0\n"
+	"  6. Print JSON report to stdout:\n"
+	"  ufseom -l -f json -o - -d /dev/ufs-bsg0\n\n"
 	"Note that to get accurate EOM data, user should disable UFS driver low power mode features,\n"
 	"such as Clock Scaling, Clock Gating, Suspend/Resume and Auto Hibernate. For example:\n"
 	"$ echo 0 > /sys/devices/<path to platform devices>/*.ufshc/clkscale_enable\n"
@@ -113,7 +130,7 @@ const char *ufseom_help =
 	"although UFS EOM is not supposed to disturb normal I/O traffics, it is recommanded to\n"
 	"reboot the system after use ufseom.\n";
 
-static char *ufseom_short_options = "plDL:t:o:d:V";
+static char *ufseom_short_options = "plDL:t:f:o:d:V";
 
 static struct option ufseom_long_options[] = {
 	{"peer", no_argument, NULL, 'p'}, /* UFS device */
@@ -121,6 +138,7 @@ static struct option ufseom_long_options[] = {
 	{"data", no_argument, NULL, 'D'}, /* Do I/Os */
 	{"lane", required_argument, NULL, 'L'}, /* Lane */
 	{"target", required_argument, NULL, 't'}, /* Target test count */
+	{"format", required_argument, NULL, 'f'}, /* Output format */
 	{"output", required_argument, NULL, 'o'}, /* EOM result output path */
 	{"device", required_argument, NULL, 'd'}, /* UFS BSG device path. For example: /dev/ufs-bsg0 */
 	{"verbose", no_argument, NULL, 'V'}, /* Enable detailed EOM information and logs */
@@ -440,16 +458,88 @@ static int generate_eom_report(char *eom_file, struct EOMData *data)
 	return SUCCESS;
 }
 
-static int check_output_path(const char *path)
+static int init_output_target(void)
 {
-	int i = 0, length = strlen(path);
+	size_t length;
 
-	for (; i < length; i++)
-		if (path[i] == ' ')
-			return ERROR;
-
-	if (path[length - 1] != '/')
+	if (optarg[0] == '\0') {
+		pr_err("Output path cannot be empty\n");
 		return ERROR;
+	}
+
+	if (!strcmp(optarg, "-")) {
+		output_target = EOM_OUTPUT_TARGET_STDOUT;
+		output_path[0] = '\0';
+		return SUCCESS;
+	}
+
+	if (strlen(optarg) >= DEVICE_PATH_NAME_SIZE_MAX) {
+		pr_err("Output path is too long\n");
+		return ERROR;
+	}
+
+	strcpy(output_path, optarg);
+	length = strlen(output_path);
+	if (output_path[length - 1] == '/')
+		output_target = EOM_OUTPUT_TARGET_DIR;
+	else
+		output_target = EOM_OUTPUT_TARGET_FILE;
+
+	return SUCCESS;
+}
+
+static int init_output_format(void)
+{
+	if (!strcmp(optarg, "text")) {
+		output_format = EOM_OUTPUT_FORMAT_TEXT;
+		return SUCCESS;
+	}
+
+	if (!strcmp(optarg, "json")) {
+		output_format = EOM_OUTPUT_FORMAT_JSON;
+		return SUCCESS;
+	}
+
+	pr_err("Invalid format '%s'. Supported values: text, json\n", optarg);
+
+	return ERROR;
+}
+
+static int get_tmp_file_path(char *tmp_file, size_t size)
+{
+	const char *tmp_dir = "/tmp/";
+
+	if (output_target == EOM_OUTPUT_TARGET_DIR)
+		tmp_dir = output_path;
+
+	if (snprintf(tmp_file, size, "%s%s", tmp_dir, ufseom_tmp_file) >= size) {
+		pr_err("Temp file path is too long\n");
+		return ERROR;
+	}
+
+	return SUCCESS;
+}
+
+static int get_output_file_path(char *output_file, size_t size, const char *eom_file_name)
+{
+	if (output_target == EOM_OUTPUT_TARGET_STDOUT) {
+		output_file[0] = '\0';
+		return SUCCESS;
+	}
+
+	if (output_target == EOM_OUTPUT_TARGET_FILE) {
+		if (snprintf(output_file, size, "%s", output_path) >= size) {
+			pr_err("Output file path is too long\n");
+			return ERROR;
+		}
+
+		return SUCCESS;
+	}
+
+	if (snprintf(output_file, size, "%s%s", output_path, eom_file_name) >= size) {
+		pr_err("Output file path is too long\n");
+		return ERROR;
+	}
 
 	return SUCCESS;
 }
@@ -530,14 +620,17 @@ static int parse_args(int argc, char *argv[])
 			verbose = true;
 			ret = SUCCESS;
 			break;
-		case 'L':
-			ret = init_lane();
-			break;
-		case 'o':
-			ret = init_device_path(output_path);
-			break;
-		case 'd':
-			ret = init_device_path(device_path);
+			case 'L':
+				ret = init_lane();
+				break;
+			case 'f':
+				ret = init_output_format();
+				break;
+			case 'o':
+				ret = init_output_target();
+				break;
+			case 'd':
+				ret = init_device_path(device_path);
 			break;
 		case 't':
 			ret = init_target_test_count();
@@ -589,14 +682,8 @@ static int parse_args(int argc, char *argv[])
 		return ERROR;
 	}
 
-	if (output_path[0] == '\0') {
-		pr_err("Path to output folder not provided.\n");
-		return ERROR;
-	}
-
-	/* Check space and '/' in the given output path */
-	if (check_output_path(output_path)) {
-		pr_err("Invalid output path\n");
+	if (output_target == EOM_OUTPUT_TARGET_UNSET) {
+		pr_err("Output destination not provided.\n");
 		return ERROR;
 	}
 
@@ -664,6 +751,8 @@ static void init_eom_operation(void)
 
 	output_path[0] = '\0';
 	device_path[0] = '\0';
+	output_target = EOM_OUTPUT_TARGET_UNSET;
+	output_format = EOM_OUTPUT_FORMAT_TEXT;
 }
 
 int main(int argc, char *argv[])
@@ -671,6 +760,7 @@ int main(int argc, char *argv[])
 	struct EOMData *data = &eom_data;
 	struct timespec ts_start, ts_end;
 	char tmp_file[1024], output_file[1024], eom_file_name[256], lane_str[8];
+	const char *report_ext;
 	size_t eom_result_size;
 	int t, v, l, n, eom_cap, cur_gear, cur_rate, ret;
 
@@ -731,8 +821,12 @@ int main(int argc, char *argv[])
 	if (!do_io)
 		goto skip_io_prepare;
 
-	strcpy(tmp_file, output_path);
-	strcat(tmp_file, ufseom_tmp_file);
+	ret = get_tmp_file_path(tmp_file, sizeof(tmp_file));
+	if (ret) {
+		ret = ERROR;
+		goto close_bsg;
+	}
+
 	tmp_fd = open(tmp_file, O_RDWR | O_DIRECT | O_CREAT, S_IWUSR | S_IRUSR);
 	if (tmp_fd < 0) {
 		pr_err("Failed to open file %s (%d)\n", tmp_file, tmp_fd);
@@ -750,13 +844,19 @@ int main(int argc, char *argv[])
 
 skip_io_prepare:
 	/* EOM result file naming rule: local/peer_lane_0/_1_targetestcount.eom */
+	report_ext = output_format == EOM_OUTPUT_FORMAT_JSON ? "json" : "eom";
 	snprintf(lane_str, sizeof(lane_str), "%d", lane);
-	snprintf(eom_file_name, sizeof(eom_file_name), "%s_lane_%s_gear_%d_ttc_%d.eom",
-						      data->local_peer ? "peer" : "local",
-						      (data->num_lanes == 2) ? "0_1" : lane_str,
-						      cur_gear, target_test_count);
-	strcpy(output_file, output_path);
-	strcat(output_file, eom_file_name);
+	snprintf(eom_file_name, sizeof(eom_file_name), "%s_lane_%s_gear_%d_ttc_%d.%s",
+							      data->local_peer ? "peer" : "local",
+							      (data->num_lanes == 2) ? "0_1" : lane_str,
+							      cur_gear, target_test_count,
+							      report_ext);
+
+	ret = get_output_file_path(output_file, sizeof(output_file), eom_file_name);
+	if (ret) {
+		ret = ERROR;
+		goto out;
+	}
 
 	/* Get RX_EYEMON_Timing_MAX_Steps_Capability */
 	data->timing_max_steps = uic_get(bsg_fd,
