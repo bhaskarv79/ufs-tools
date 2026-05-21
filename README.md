@@ -96,6 +96,21 @@ For detailed usage of `ufseom`, refer to its help menu:
 $ ./ufseom -h
 ```
 
+`ufseom` supports `text` (default) and `json` report formats:
+
+```bash
+# Save JSON report to a file path
+$ ./ufseom -l -f json -o /data/local_lane_0_gear_4_ttc_93.json -d /dev/ufs-bsg0
+
+# Save JSON report to a folder (auto-generated filename)
+$ ./ufseom -l -f json -o /data/ -d /dev/ufs-bsg0
+
+# Print JSON report to stdout
+$ ./ufseom -l -f json -o - -d /dev/ufs-bsg0
+```
+
+JSON report schema: `ufs-cli/eom-report.schema.json`
+
 ## License
 
 This project is licensed under the BSD-3-Clause-Clear license.
