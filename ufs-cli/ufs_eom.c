@@ -90,6 +90,14 @@ static bool verbose;
 static int output_target;
 static int output_format;
 
+static FILE *runtime_log_stream(void)
+{
+	if (output_target == EOM_OUTPUT_TARGET_STDOUT && output_format == EOM_OUTPUT_FORMAT_JSON)
+		return stderr;
+
+	return stdout;
+}
+
 const char *ufseom_help =
 	"\nufseom cli :\n\n"
 	"ufseom [-p | --peer | -l | --local] [-D | --data] [-L | --lane <lane no.>] [--voltage-low <low voltage value>] [--voltage-high <high voltage value>] [--timing-left <left timing value>] [--timing-right <right timing value>] [-T | --target <target test count>] [-f | --format <text|json>] [-o | --output <output>] [-d | --device <device>]\n\n"
@@ -399,10 +407,11 @@ skip_io:
 		return ERROR;
 	}
 
-	/* EOM has stopped, good to log results */
-	if (eom_tested_count >= target_count || eom_error_count >= EOM_PHY_ERROR_COUNT_THRESHOLD) {
-		if (verbose)
-			printf("lane: %d timing: %d voltage: %d error count: %d [tested_count: %d]\n", lane, timing, volt,
+		/* EOM has stopped, good to log results */
+		if (eom_tested_count >= target_count || eom_error_count >= EOM_PHY_ERROR_COUNT_THRESHOLD) {
+			if (verbose)
+				fprintf(runtime_log_stream(),
+				       "lane: %d timing: %d voltage: %d error count: %d [tested_count: %d]\n", lane, timing, volt,
 												       eom_error_count,
 												       eom_tested_count);
 
@@ -929,7 +938,7 @@ int main(int argc, char *argv[])
 		ret = ERROR;
 		goto close_bsg;
 	} else if (verbose) {
-		printf("PA_RxGear: %d\n", cur_gear);
+		fprintf(runtime_log_stream(), "PA_RxGear: %d\n", cur_gear);
 	}
 
 	if (cur_gear < EOM_SUPPORTED_MIN_GEAR) {
@@ -947,7 +956,7 @@ int main(int argc, char *argv[])
 		ret = ERROR;
 		goto close_bsg;
 	} else if (verbose) {
-		printf("RX_HSRATE_Series: %d\n", cur_rate);
+		fprintf(runtime_log_stream(), "RX_HSRATE_Series: %d\n", cur_rate);
 	}
 
 	data->rate = cur_rate;
@@ -1033,9 +1042,11 @@ skip_io_prepare:
 	}
 
 	if (verbose) {
-		printf("EOM Capabilities:\n");
-		printf("TimingMaxSteps %d TimingMaxOffset %d\n", data->timing_max_steps, data->timing_max_offset);
-		printf("VoltageMaxSteps %d VoltageMaxOffset %d\n", data->voltage_max_steps, data->voltage_max_offset);
+		fprintf(runtime_log_stream(), "EOM Capabilities:\n");
+		fprintf(runtime_log_stream(), "TimingMaxSteps %d TimingMaxOffset %d\n",
+			data->timing_max_steps, data->timing_max_offset);
+		fprintf(runtime_log_stream(), "VoltageMaxSteps %d VoltageMaxOffset %d\n",
+			data->voltage_max_steps, data->voltage_max_offset);
 	}
 
 	/* Sanity check for voltage and timing range*/
@@ -1047,8 +1058,8 @@ skip_io_prepare:
 	}
 
 	if (verbose)
-		printf("timing_left:%d, timing_right:%d, voltage_low:%d, voltage_high:%d\n",
-					timing_left, timing_right, voltage_low, voltage_high);
+		fprintf(runtime_log_stream(), "timing_left:%d, timing_right:%d, voltage_low:%d, voltage_high:%d\n",
+						timing_left, timing_right, voltage_low, voltage_high);
 
 	eom_result_count = (timing_right - timing_left + 1) * (voltage_high - voltage_low + 1) * data->num_lanes;
 	eom_result_size = eom_result_count * sizeof(struct eom_result);
@@ -1063,7 +1074,7 @@ skip_io_prepare:
 	/* Set seed for a new sequence of pseudo-random integers */
 	srand((unsigned)clock());
 
-	printf("Start EOM Scan...\n");
+	fprintf(runtime_log_stream(), "Start EOM Scan...\n");
 	clock_gettime(CLOCK_MONOTONIC, &ts_start);
 	/* Main loop starts here */
 	for (l = lane, n = data->num_lanes; n > 0; n--, l++) {
@@ -1086,7 +1097,7 @@ skip_io_prepare:
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &ts_end);
-	printf("EOM Scan Finished!\n Time elapsed: %ld seconds\n", ts_end.tv_sec - ts_start.tv_sec);
+	fprintf(runtime_log_stream(), "EOM Scan Finished!\n Time elapsed: %ld seconds\n", ts_end.tv_sec - ts_start.tv_sec);
 
 	ret = generate_eom_report(output_file, data);
 	if (ret)
